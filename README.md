@@ -346,7 +346,14 @@ consume the schedule.
 
 `npm run preflight` checks the links a test can't: that `SERVER_URL` isn't stale,
 that the deployed assistant's declared tools all exist in `tools.js`, that a phone
-number points at this assistant, and that the database is actually reachable.
+number points at this assistant, that the database is reachable, and that the
+**deployed prompt still matches the repo**.
+
+That last check earned its place. The live prompt silently fell behind the source
+at one point, and the symptom was baffling — the agent ignored a rule that was
+plainly in `deployAssistant.js`, looping on a field because the deployed prompt
+predated the `give_up` contract its webhook was already returning. Comparing the
+two takes one API call and turns an hour of confusion into one line of output.
 
 `/health` is a real check, not a constant: it returns **503 with the reason** if
 the database is misconfigured or unreachable, so a broken deploy is diagnosable

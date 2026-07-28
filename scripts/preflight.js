@@ -10,6 +10,7 @@
 //   npm run preflight
 
 import "dotenv/config";
+import { readFileSync } from "node:fs";
 
 const PORT = process.env.PORT || 3000;
 const SERVER_URL = process.env.SERVER_URL;
@@ -31,6 +32,21 @@ function warn(msg, fix) {
   warnings++;
   console.log(`  WARN  ${msg}`);
   if (fix) console.log(`        -> ${fix}`);
+}
+
+/**
+ * Pull SYSTEM_PROMPT out of scripts/deployAssistant.js without executing it.
+ * Returns null if the shape changed, so the check degrades to a warning rather
+ * than a false alarm.
+ */
+function extractLocalPrompt() {
+  try {
+    const source = readFileSync(new URL("./deployAssistant.js", import.meta.url), "utf8");
+    const match = source.match(/const SYSTEM_PROMPT = `([\s\S]*?)`\s*\.trim\(\)/);
+    return match ? match[1].trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 const vapi = (path) =>
@@ -179,6 +195,30 @@ if (VAPI_API_KEY && ASSISTANT_ID) {
       else ok("every declared tool is implemented");
       if (unused.length)
         warn(`implemented but not declared: ${unused.join(", ")}`, "Add the schema in deployAssistant.js, then redeploy");
+
+      // Prompt drift. The deployed prompt can silently fall behind the repo — a
+      // dashboard edit, or a deploy run from an older checkout — and the symptom
+      // is baffling: the agent ignores rules that are plainly in the source. This
+      // actually happened, and the agent looped on a field because the live prompt
+      // predated the give_up rule while the webhook was returning that flag.
+      //
+      // Read as text rather than imported, because importing deployAssistant.js
+      // would run the deploy as a side effect.
+      const localPrompt = extractLocalPrompt();
+      const livePrompt = (a.model?.messages ?? []).find((m) => m.role === "system")?.content ?? "";
+
+      if (!localPrompt) {
+        warn("couldn't read the local system prompt — can't check for drift");
+      } else if (localPrompt === livePrompt) {
+        ok(`prompt matches the repo (${livePrompt.length} chars)`);
+      } else {
+        bad(
+          `deployed prompt does NOT match scripts/deployAssistant.js\n` +
+            `        deployed: ${livePrompt.length} chars\n` +
+            `        repo:     ${localPrompt.length} chars`,
+          "npm run deploy:assistant"
+        );
+      }
 
       if (a.server?.url === SERVER_URL) ok("assistant webhook matches SERVER_URL");
       else
