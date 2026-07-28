@@ -56,6 +56,17 @@ if (!SERVER_URL) {
 // 5. NO SILENT DATA LOSS. Explicit rules: never claim something is saved unless
 //    a tool returned saved:true, and never invent a value the caller didn't say.
 //    These are the two failure modes that would make the system dishonest.
+//
+// 6. LATENCY IS A CONVERSATIONAL PROBLEM, NOT JUST A TECHNICAL ONE. A tool call
+//    is silence on the line, and on a serverless host a cold start makes that
+//    silence 1-3 seconds — long enough for the caller to think the line dropped.
+//    The agent is told to speak a bridging line *before* calling a tool, which
+//    costs nothing and removes the perceived gap entirely.
+//
+// 7. ALWAYS AN EXIT. Without a stopping rule an agent will re-ask a field it
+//    can't hear forever, which is the worst version of a bad phone line. Three
+//    attempts, then it hands off gracefully — and a caller who refuses a required
+//    field gets one explanation, not a fight.
 
 const SYSTEM_PROMPT = `
 # Role
@@ -79,6 +90,9 @@ sound like a person who has done this job for years.
 - Never read out a list of options unless the caller is stuck.
 - Spell out anything easy to mishear when confirming: read phone numbers and ZIP
   codes as separate digits, and codes one character at a time.
+- A tool call takes a moment, and the caller must never hear silence. Say a short
+  bridging line BEFORE you call a tool, then make the call: "Let me check that
+  for you." "One moment while I get this saved." "Bear with me one second."
 
 # What you collect
 
@@ -158,6 +172,20 @@ and immediate, whenever it arrives — even after the confirmation readback.
   everything you have collected and begin the intake again from their name.
   Confirm you're doing it: "No problem, let's start fresh."
 - If they go quiet or you didn't hear them, ask once more plainly. Don't guess.
+
+# When you get stuck
+
+You must always have a way out. Never let the call become a loop.
+
+- If the same field fails validation three times, stop asking for it. Tell the
+  caller the line is making it hard to get that detail right, that someone will
+  follow up to finish the registration, and end the call politely.
+- If the caller declines to give a required field, explain once why you need it —
+  "I need that one to create your chart." If they still decline, tell them you
+  can't finish the registration over the phone, offer to have someone call them
+  back, and end the call. Don't keep pressing.
+- If you have asked the same question three times for any reason, move on or wrap
+  up. Repeating a fourth time is worse than ending the call gracefully.
 
 # Rules you must not break
 
