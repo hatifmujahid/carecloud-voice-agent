@@ -1,0 +1,21 @@
+node_modules/
+.env
+.env.local
+
+# SQLite database + WAL sidecars. Patient data never belongs in git, and the
+# schema is recreated automatically on first run.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+logs/
+*.log
+.firecrawl/
+.DS_Store
+
+# Vercel CLI local state (contains the linked project/org ids)
+.vercel
+
+# The assessment brief is marked confidential — keep it out of the repo.
+*.pdf

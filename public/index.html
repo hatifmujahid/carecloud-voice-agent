@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CareCloud — Registered Patients</title>
+    <style>
+      :root {
+        --bg: #0f1117;
+        --panel: #171a23;
+        --border: #262b38;
+        --text: #e7e9ee;
+        --muted: #8b93a7;
+        --accent: #4f8cff;
+        --ok: #3ecf8e;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      header {
+        padding: 24px 32px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      h1 { font-size: 18px; margin: 0; font-weight: 600; }
+      .count { color: var(--muted); font-size: 14px; }
+      .count b { color: var(--ok); }
+      main { padding: 24px 32px 64px; }
+      .controls { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+      input {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 8px 12px;
+        border-radius: 6px;
+        font: inherit;
+        min-width: 200px;
+      }
+      input:focus { outline: none; border-color: var(--accent); }
+      button {
+        background: var(--accent);
+        border: 0;
+        color: #fff;
+        padding: 8px 16px;
+        border-radius: 6px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th {
+        text-align: left;
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 0 12px 8px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+      tr:hover td { background: var(--panel); }
+      .name { font-weight: 600; }
+      .sub { color: var(--muted); font-size: 13px; }
+      .id { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+      .empty, .error { padding: 48px 12px; text-align: center; color: var(--muted); }
+      .error { color: #ff6b6b; }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 99px;
+        background: #1e2430;
+        border: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>CareCloud — Registered Patients</h1>
+      <span class="count" id="count"></span>
+    </header>
+    <main>
+      <div class="controls">
+        <input id="q" placeholder="Filter by last name…" autocomplete="off" />
+        <button id="search">Search</button>
+        <button id="clear" class="ghost">Clear</button>
+        <button id="refresh" class="ghost">Refresh</button>
+      </div>
+      <div id="out"><div class="empty">Loading…</div></div>
+    </main>
+
+    <script>
+      // Read-only view over GET /patients. Deliberately dependency-free: it's a
+      // demonstration surface, not a product, and it should never be the reason
+      // the deployment breaks.
+      const out = document.getElementById("out");
+      const countEl = document.getElementById("count");
+      const q = document.getElementById("q");
+
+      // Everything from the database is escaped before it reaches innerHTML.
+      // Records arrive from phone callers, so they are untrusted input.
+      const esc = (v) =>
+        String(v ?? "").replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        }[c]));
+
+      const dash = (v) => (v ? esc(v) : '<span class="sub">—</span>');
+
+      async function load() {
+        const params = new URLSearchParams();
+        if (q.value.trim()) params.set("last_name", q.value.trim());
+
+        out.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+          const res = await fetch("/api/patients?" + params);
+          const body = await res.json();
+          if (body.error) throw new Error(body.error.message);
+          render(body.data.patients);
+        } catch (err) {
+          out.innerHTML = '<div class="error">Could not load patients: ' + esc(err.message) + "</div>";
+          countEl.textContent = "";
+        }
+      }
+
+      function render(patients) {
+        countEl.innerHTML = "<b>" + patients.length + "</b> record" + (patients.length === 1 ? "" : "s");
+
+        if (!patients.length) {
+          out.innerHTML =
+            '<div class="empty">No patients yet. Call the number and register one.</div>';
+          return;
+        }
+
+        out.innerHTML =
+          "<table><thead><tr>" +
+          ["Patient", "Date of birth", "Phone", "Address", "Insurance", "Emergency contact", "Registered"]
+            .map((h) => "<th>" + h + "</th>")
+            .join("") +
+          "</tr></thead><tbody>" +
+          patients.map(row).join("") +
+          "</tbody></table>";
+      }
+
+      function row(p) {
+        const address = [
+          p.address_line_1,
+          p.address_line_2,
+          [p.city, p.state].filter(Boolean).join(", ") + " " + (p.zip_code || ""),
+        ]
+          .filter((line) => line && line.trim())
+          .map(esc)
+          .join("<br />");
+
+        return (
+          "<tr>" +
+          '<td><div class="name">' + esc(p.display.full_name) + "</div>" +
+          '<div class="sub">' + esc(p.sex) + " · " + esc(p.preferred_language) + "</div>" +
+          '<div class="id">' + esc(p.patient_id) + "</div></td>" +
+          "<td>" + dash(p.display.date_of_birth) + "</td>" +
+          "<td>" + dash(p.display.phone_number) +
+          (p.email ? '<div class="sub">' + esc(p.email) + "</div>" : "") + "</td>" +
+          "<td>" + (address || '<span class="sub">—</span>') + "</td>" +
+          "<td>" + dash(p.insurance_provider) +
+          (p.insurance_member_id ? '<div class="sub">' + esc(p.insurance_member_id) + "</div>" : "") +
+          "</td>" +
+          "<td>" + dash(p.emergency_contact_name) +
+          (p.display.emergency_contact_phone
+            ? '<div class="sub">' + esc(p.display.emergency_contact_phone) + "</div>"
+            : "") +
+          "</td>" +
+          '<td><span class="pill">' + esc(new Date(p.created_at).toLocaleString()) + "</span></td>" +
+          "</tr>"
+        );
+      }
+
+      document.getElementById("search").onclick = load;
+      document.getElementById("refresh").onclick = load;
+      document.getElementById("clear").onclick = () => {
+        q.value = "";
+        load();
+      };
+      q.addEventListener("keydown", (e) => e.key === "Enter" && load());
+
+      load();
+      // Refresh while a call is in progress so a registration appears live.
+      setInterval(load, 15000);
+    </script>
+  </body>
+</html>
