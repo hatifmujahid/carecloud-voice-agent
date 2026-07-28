@@ -98,6 +98,35 @@ waits).
 for local development; `api/index.js` exports the same app as a Vercel function.
 One app definition, so the two runtimes can't drift.
 
+### Project layout
+
+```
+api/index.js                Vercel entry point — exports the Express app
+server.js                   local entry point — binds a port, handles signals
+vercel.json                 routing: /dashboard from CDN, everything else to the function
+
+src/app.js                  Express app: routes, webhook auth, Vapi envelope
+src/api.js                  REST endpoints, status codes, { data, error } envelope
+src/patients.js             service layer — the only reader/writer of patient records
+src/appointments.js         scheduling (generated slots, persisted bookings)
+src/validation.js           field rules + normalization, shared by both front doors
+src/db.js                   MongoDB connection, $jsonSchema validators, indexes
+src/logger.js               structured JSON logging
+
+tools.js                    the six tools the voice agent can call
+public/index.html           dashboard (zero dependencies, served from the CDN)
+
+scripts/deployAssistant.js  system prompt, voice, tool schemas -> pushed to Vapi
+scripts/preflight.js        verifies the whole chain before you place a call
+scripts/migrate.js          creates collections, validators and indexes
+scripts/seed.js             two demo patients
+scripts/pushVercelEnv.js    copies .env into Vercel without printing values
+scripts/probeVoices.js      finds which voice IDs this Vapi account accepts
+scripts/testApi.js          53 assertions — REST layer
+scripts/testWebhook.js      63 assertions — voice tools, real Vapi payload shapes
+scripts/testPersistence.js   8 assertions — survives a restart
+```
+
 ---
 
 ## Tech stack, and why
@@ -201,6 +230,26 @@ while quietly losing data. Local development points at the same Atlas cluster; s
 No secrets are committed. `.env` is gitignored; `.env.example` documents every
 variable with no values.
 
+### npm scripts
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Local server with auto-reload on :3000 |
+| `npm start` | Local server, no watch |
+| `npm run migrate` | Create collections, `$jsonSchema` validators and indexes |
+| `npm run seed` | Insert two demo patients (idempotent) |
+| `npm run deploy:assistant` | Push the prompt, voice and tool schemas to Vapi |
+| `npm run preflight` | Verify the whole chain before placing a call |
+| `npm test` | All three suites — 124 assertions |
+| `npm run test:api` | REST layer only (53) |
+| `npm run test:webhook` | Voice tools only (63) |
+| `npm run test:persistence` | Restart survival only (8) |
+| `npm run vercel:env` | Copy the needed `.env` keys into Vercel, without printing them |
+| `npm run probe:voices` | List which voice IDs this Vapi account actually accepts |
+
+Any test command accepts `TEST_BASE_URL` to run against a deployed instance
+instead of localhost.
+
 ---
 
 ## Deploying to Vercel
@@ -237,7 +286,8 @@ npm run vercel:env      # pushes the needed keys, never printing their values
 npx vercel --prod       # redeploy so the new values take effect
 ```
 
-`SERVER_URL` must be `https://<your-project>.vercel.app/vapi/webhook`. `PORT` and
+`SERVER_URL` must be your deployment's URL plus the webhook path — for this
+deployment, `https://carecloud-voice-agent.vercel.app/vapi/webhook`. `PORT` and
 `LOG_FILE` are deliberately not pushed — Vercel assigns the port, and its
 filesystem is read-only so a log file would be silently disabled.
 
@@ -362,7 +412,7 @@ forms, so the dashboard and the spoken readback don't each reinvent formatting.
 ## Prompt engineering
 
 The full prompt is in `scripts/deployAssistant.js`, with the reasoning for each
-section in a comment block above it. The five decisions that mattered:
+section in a comment block above it. The seven decisions that mattered:
 
 1. **Voice-first style rules come before the task.** The model's default register
    is written English — lists, parentheses, field names. Rules are concrete
@@ -390,6 +440,17 @@ section in a comment block above it. The five decisions that mattered:
    returned `saved: true`; never invent a value the caller didn't say (including
    guessing a city from a ZIP). A false confirmation is the worst outcome this
    system can produce.
+
+6. **Latency is a conversational problem, not just a technical one.** A tool call
+   is silence on the line, and on a serverless host a cold start stretches that to
+   1–3 seconds — long enough for the caller to think they've been cut off. The
+   agent speaks a bridging line *before* calling a tool ("One moment while I get
+   this saved"), which costs nothing and removes the perceived gap.
+
+7. **There is always an exit.** Without a stopping rule, an agent will re-ask a
+   field it can't hear forever — the worst version of a bad phone line. Three
+   attempts, then a graceful hand-off; and a caller who declines a required field
+   gets one explanation rather than a fight.
 
 ### Tool design
 
@@ -425,6 +486,9 @@ cross-checks them and fails if they drift.
 | A tool throws unexpectedly | `src/app.js` converts it to a spoken-recoverable message and still returns HTTP 200 — a webhook 500 would stall the call rather than degrade it. |
 | Call drops mid-registration | Nothing partial is ever written, so there's no half-record. `end-of-call-report` logs the reason and stores the transcript. |
 | Caller talks over the agent | `stopSpeakingPlan` interrupts on 2+ words, so a long readback can be cut off, but a one-word "mhm" doesn't derail it. |
+| A field can't be heard, repeatedly | After three failed attempts on the same field the agent stops, explains the line is making it difficult, and hands off to a callback. Without this rule an agent loops indefinitely. |
+| Caller refuses a required field | One brief explanation of why it's needed; if they still decline, the agent says registration can't be completed by phone and offers a callback rather than pressing. |
+| Silence while a tool runs | The agent speaks a bridging line before every tool call, so a slow round trip or a cold start doesn't read as a dropped call. |
 | Same person calls twice | `lookupPatientByPhone` matches on phone number and the agent offers to update. `registerPatient` independently refuses to create a duplicate unless `allow_duplicate` is set. |
 | Two callers want the same appointment slot | `slot_id` is the primary key, so the second insert fails and the agent is told to offer another time. |
 | Tool calls land on different instances | All cross-call state is in the database, so it doesn't matter which instance serves which request. |
@@ -518,12 +582,25 @@ In rough priority order, given more time:
 1. **Warm the function, or move to a container.** Cold-start silence is the single
    biggest remaining threat to call quality.
 2. **Auth on the REST API** — API-key middleware, then per-client scoping.
-3. **Better duplicate matching** — phone *plus* name/DOB fuzzy match, so
+3. **Four conversational improvements** already identified and deliberately
+   deferred, because each changes the call flow and needs voice testing rather
+   than the automated suite:
+   - **Chunk the confirmation readback.** Sixteen fields in one breath is a
+     30-second monologue; two or three groups, each with its own "right?", is
+     easier to follow and cheaper to correct.
+   - **Reuse the caller's own number.** Vapi provides it on inbound calls, so
+     *"is the number you're calling from the best one for us?"* removes the
+     highest-risk transcription field from the conversation entirely.
+   - **Handle third-party registration.** "I'd like to register my daughter" is a
+     normal opening, and the agent currently assumes the caller is the patient.
+   - **Spell unusual names back proactively**, rather than only reacting when the
+     caller volunteers a correction.
+4. **Better duplicate matching** — phone *plus* name/DOB fuzzy match, so
    shared-number households resolve correctly.
-4. **Unit tests for the validators** — currently covered end-to-end through the
+5. **Unit tests for the validators** — currently covered end-to-end through the
    API, which is slower and less precise than testing `src/validation.js` directly.
-5. **Idempotency keys on `POST /patients`** — so a retried write after a network
+6. **Idempotency keys on `POST /patients`** — so a retried write after a network
    blip can't create a second record.
-6. **Structured call analytics** — completion rate, average duration, and which
+7. **Structured call analytics** — completion rate, average duration, and which
    field most often needs a re-prompt. That last number is what would tell you
    where the prompt or the transcriber is actually losing people.
