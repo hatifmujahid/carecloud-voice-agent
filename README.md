@@ -421,6 +421,16 @@ section in a comment block above it. The seven decisions that mattered:
    ("under about 25 words", "never say `address_line_1`") rather than "be
    conversational", which does nothing.
 
+   **Then listening to a real call exposed the cost:** those brevity rules worked
+   *too* well and produced an agent that was efficient and cold. Tone has to be
+   specified as deliberately as structure — the model won't infer it. So there's now
+   an explicit warmth section that puts the humanity at the seams of the call
+   (greeting, errors, hesitation, closing) while keeping field collection brisk, and
+   the word limit is stated as a guide rather than a rule. The same call showed the
+   agent asking permission to hang up — *"is there anything else?"* — which drags
+   out a finished call and makes the caller do the agent's job; that's now forbidden
+   outright.
+
 2. **Batched collection.** Asking sixteen questions one at a time is the single
    biggest reason these agents feel like an IVR. Fields are grouped the way a
    human coordinator asks — name together, whole address in one breath — and the
@@ -434,9 +444,11 @@ section in a comment block above it. The seven decisions that mattered:
 
 4. **Failure is scripted, not improvised.** Every tool returns a `say` or
    `errors[].say` string, and the prompt tells the agent to use that wording.
-   That's what turns a validation failure into *"That date is in the future, so it
-   can't be a date of birth. What year were you born?"* instead of a generic
-   apology.
+   Because those strings are spoken verbatim they're written to blame the line
+   rather than the caller — *"Sorry, I only caught 3 digits — a US phone number
+   needs 10 including the area code"* rather than "that's invalid" — and they avoid
+   system vocabulary like "I can't store that". A caller on a bad line should never
+   feel they're the one getting it wrong.
 
 5. **Two rules that make it honest.** Never claim something is saved unless a tool
    returned `saved: true`; never invent a value the caller didn't say (including

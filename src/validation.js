@@ -95,11 +95,11 @@ function validateName(raw, label) {
 
   value = titleCaseIfUniform(joinSpelledLetters(value));
 
-  if (value.length > 50) return fail(`That ${label} is too long — I can store up to 50 characters.`);
+  if (value.length > 50) return fail(`Sorry, I think I misheard — could you give me just your ${label}?`);
   // Letters (incl. accented), spaces, hyphens, apostrophes. Digits are the
   // common STT failure here ("Smith 2" from a noisy line), so reject them.
   if (!/^[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ' -]*$/.test(value)) {
-    return fail(`That ${label} has characters I can't store — it should be letters, hyphens or apostrophes only. Could you spell it for me?`);
+    return fail(`Sorry, I don't think I caught that properly. Could you spell your ${label} for me?`);
   }
   return ok(value);
 }
@@ -133,7 +133,7 @@ export const validators = {
       // so ask rather than guess.
       return fail("I need the full four-digit year. What year were you born?");
     } else {
-      return fail("I couldn't make sense of that date. Could you give me your date of birth as month, day, and year?");
+      return fail("Sorry, I didn't quite catch that. Could you give me your date of birth as month, day, and year?");
     }
 
     if (m < 1 || m > 12) return fail(`There's no month ${m}. What's your date of birth?`);
@@ -143,7 +143,7 @@ export const validators = {
     // the Date constructor silently rolls those over into the next month.
     const date = new Date(Date.UTC(y, m - 1, d));
     if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) {
-      return fail("That date doesn't exist on the calendar. Could you say your date of birth again?");
+      return fail("Sorry, that didn't come through as a real date. Could you say your date of birth once more?");
     }
 
     // Compare against today's UTC date only, so a birthday "today" is valid
@@ -151,7 +151,7 @@ export const validators = {
     const today = new Date();
     const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
     if (date.getTime() > todayUtc) {
-      return fail("That date is in the future, so it can't be a date of birth. What year were you born?");
+      return fail("Sorry, I must have misheard — that came through as a future date. What year were you born?");
     }
     if (y < today.getUTCFullYear() - 130) {
       return fail("That would make you over 130 years old — I think I misheard the year. Could you repeat it?");
@@ -188,11 +188,11 @@ export const validators = {
       .replace(/\.$/, ""); // trailing period from a dictated sentence
 
     if (!value) return fail("I didn't catch the email address. Could you say it again?");
-    if (value.length > 254) return fail("That email address is longer than I can store.");
+    if (value.length > 254) return fail("That email address came through longer than I expected — could you say it again?");
     // Deliberately pragmatic, not RFC 5322: one @, no whitespace, a dotted
     // domain with a 2+ character TLD. Catches every realistic mis-hear.
     if (!/^[^\s@]+@[^\s@.]+(\.[^\s@.]+)*\.[A-Za-z]{2,}$/.test(value)) {
-      return fail("That doesn't look like a complete email address. Could you spell it out for me, including the part after the at sign?");
+      return fail("Sorry, I didn't catch that whole email address. Could you spell it out for me, including the part after the at sign?");
     }
     return ok(value);
   },
@@ -200,22 +200,22 @@ export const validators = {
   address_line_1: (raw) => {
     const value = clean(raw);
     if (!value) return fail("I didn't get the street address. What's your street number and street name?");
-    if (value.length > 200) return fail("That street address is longer than I can store.");
+    if (value.length > 200) return fail("That street address came through longer than I expected — could you say it again?");
     return ok(value);
   },
 
   address_line_2: (raw) => {
     const value = clean(raw);
-    if (value.length > 100) return fail("That apartment or unit is longer than I can store.");
+    if (value.length > 100) return fail("That apartment or unit came through longer than I expected — could you say it again?");
     return ok(value); // genuinely optional — empty is fine
   },
 
   city: (raw) => {
     const value = titleCaseIfUniform(clean(raw));
     if (!value) return fail("I didn't catch the city. What city is that?");
-    if (value.length > 100) return fail("That city name is longer than I can store.");
+    if (value.length > 100) return fail("That city name came through longer than I expected — could you say it again?");
     if (!/^[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ.' -]*$/.test(value)) {
-      return fail("That city name has characters I can't store. Could you say just the city?");
+      return fail("Sorry, I didn't catch that clearly. Could you say just the city?");
     }
     return ok(value);
   },
@@ -232,9 +232,9 @@ export const validators = {
     if (byName) return ok(byName);
 
     if (collapsed.length === 2) {
-      return fail(`${collapsed} isn't a US state abbreviation. Which state is that?`);
+      return fail(`${collapsed} doesn't sound like a US state to me — I may have misheard. Which state is it?`);
     }
-    return fail(`I don't recognize "${text}" as a US state. Could you say the state again?`);
+    return fail(`Sorry, I didn't quite get the state. Could you say it once more?`);
   },
 
   zip_code: (raw) => {
@@ -244,12 +244,12 @@ export const validators = {
     if (!bare) return fail("I didn't catch the ZIP code. What is it?");
     if (bare.length === 5) return ok(bare);
     if (bare.length === 9) return ok(`${bare.slice(0, 5)}-${bare.slice(5)}`);
-    return fail(`A ZIP code needs 5 digits, or 9 for ZIP plus four — I heard ${bare.length}. Could you say it again?`);
+    return fail(`Sorry, I caught ${bare.length} digits — a ZIP code needs 5, or 9 for ZIP plus four. Could you say it again?`);
   },
 
   insurance_provider: (raw) => {
     const value = clean(raw);
-    if (value.length > 100) return fail("That insurance provider name is longer than I can store.");
+    if (value.length > 100) return fail("That insurance provider name came through longer than I expected — could you say it again?");
     return ok(value);
   },
 
@@ -257,9 +257,9 @@ export const validators = {
     // Member IDs are dictated with spaces and dashes that aren't part of the ID.
     const value = clean(raw).toUpperCase().replace(/[^A-Z0-9-]/g, "");
     if (!value) return ok("");
-    if (value.length > 50) return fail("That member ID is longer than I can store.");
+    if (value.length > 50) return fail("That member ID came through longer than I expected — could you say it again?");
     if (!/^[A-Z0-9-]+$/.test(value)) {
-      return fail("A member ID should be letters and numbers. Could you read it out once more?");
+      return fail("Sorry, I didn't get all of that. Could you read the member ID out once more?");
     }
     return ok(value);
   },
@@ -267,7 +267,7 @@ export const validators = {
   preferred_language: (raw) => {
     const value = titleCaseIfUniform(clean(raw));
     if (!value) return ok("English"); // documented default
-    if (value.length > 50) return fail("That language name is longer than I can store.");
+    if (value.length > 50) return fail("That language name came through longer than I expected — could you say it again?");
     if (!/^[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ -]*$/.test(value)) {
       return fail("I didn't recognize that language. Which language do you prefer?");
     }
@@ -277,9 +277,9 @@ export const validators = {
   emergency_contact_name: (raw) => {
     const value = clean(raw).replace(/[.]/g, "");
     if (!value) return ok("");
-    if (value.length > 100) return fail("That name is longer than I can store.");
+    if (value.length > 100) return fail("That name came through longer than I expected — could you say it again?");
     if (!/^[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ' -]*$/.test(value)) {
-      return fail("That emergency contact name has characters I can't store. Could you say just the first and last name?");
+      return fail("Sorry, I didn't catch that clearly. Could you give me just the first and last name?");
     }
     return ok(titleCaseIfUniform(value));
   },
@@ -294,12 +294,12 @@ function validateUsPhone(raw, label) {
   if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
 
   if (d.length !== 10) {
-    return fail(`A US ${label} needs 10 digits including the area code — I only heard ${d.length}. Could you say it again?`);
+    return fail(`Sorry, I only caught ${d.length} digits — a US ${label} needs 10 digits including the area code. Could you say it once more?`);
   }
   // NANP structure: neither the area code nor the exchange may start with 0 or
   // 1. This is what catches a transcription that dropped or added a digit.
-  if (/^[01]/.test(d)) return fail(`Area codes don't start with a ${d[0]}. Could you repeat the ${label}, starting with the area code?`);
-  if (/^[01]/.test(d.slice(3))) return fail(`That doesn't look like a valid US ${label}. Could you say all ten digits again?`);
+  if (/^[01]/.test(d)) return fail(`Sorry, I think I dropped a digit there. Could you give me the whole ${label} again, starting with the area code?`);
+  if (/^[01]/.test(d.slice(3))) return fail(`Sorry, I don't think I got that right. Could you say all ten digits again?`);
 
   return ok(d);
 }
