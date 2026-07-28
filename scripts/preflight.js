@@ -121,7 +121,10 @@ try {
   info("ngrok local API not reachable — skipping (fine if you deployed to a real host)");
 }
 
-if (liveTunnel && SERVER_URL) {
+// Only compare against the tunnel when SERVER_URL is actually *meant* to be the
+// tunnel. Once deployed to a real host, a tunnel left running in another terminal
+// is irrelevant — flagging it as "stale" would be a false alarm.
+if (liveTunnel && SERVER_URL && /ngrok/i.test(SERVER_URL)) {
   const expected = `${liveTunnel}/vapi/webhook`;
   if (expected === SERVER_URL) ok("SERVER_URL matches the live tunnel");
   else
@@ -129,6 +132,8 @@ if (liveTunnel && SERVER_URL) {
       `SERVER_URL is stale.\n        .env:        ${SERVER_URL}\n        live tunnel: ${expected}`,
       "Update SERVER_URL in .env, then: npm run deploy:assistant"
     );
+} else if (liveTunnel && SERVER_URL) {
+  info("SERVER_URL points at a deployed host, not the tunnel — ignoring ngrok");
 }
 
 // --- 5. Public reachability ------------------------------------------------

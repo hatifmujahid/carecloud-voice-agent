@@ -13,14 +13,14 @@ Built for the Voice AI Agent take-home assessment.
 | | |
 | --- | --- |
 | **Phone number** | **+1 (984) 477-7167** |
-| **API base URL** | `https://<your-project>.vercel.app` |
-| **Dashboard** | `https://<your-project>.vercel.app/dashboard` |
-| **Health check** | `https://<your-project>.vercel.app/health` |
+| **API base URL** | https://carecloud-voice-agent.vercel.app |
+| **Dashboard** | https://carecloud-voice-agent.vercel.app/dashboard |
+| **Health check** | https://carecloud-voice-agent.vercel.app/health |
 
 Try it:
 
 ```bash
-BASE=https://<your-project>.vercel.app
+BASE=https://carecloud-voice-agent.vercel.app
 
 # Everyone registered so far
 curl $BASE/patients
@@ -228,25 +228,25 @@ vercel login
 vercel --prod
 ```
 
-**4. Set the environment variables** in the Vercel dashboard (Settings →
-Environment Variables), or from the CLI:
+**4. Set the environment variables.** Either in the Vercel dashboard (Settings →
+Environment Variables), or copy them straight from `.env`:
 
 ```bash
-for KEY in VAPI_API_KEY VAPI_SERVER_SECRET MONGODB_URI MONGODB_DB \
-           SERVER_URL LLM_MODEL TRANSCRIBER_MODEL VOICE_PROVIDER VOICE_ID; do
-  vercel env add $KEY production
-done
-vercel --prod          # redeploy so the new variables take effect
+npx vercel login && npx vercel link
+npm run vercel:env      # pushes the needed keys, never printing their values
+npx vercel --prod       # redeploy so the new values take effect
 ```
 
-`SERVER_URL` must be `https://<your-project>.vercel.app/vapi/webhook`.
+`SERVER_URL` must be `https://<your-project>.vercel.app/vapi/webhook`. `PORT` and
+`LOG_FILE` are deliberately not pushed — Vercel assigns the port, and its
+filesystem is read-only so a log file would be silently disabled.
 
 **5. Point the assistant at it and verify.**
 
 ```bash
 npm run deploy:assistant     # pushes the new webhook URL to Vapi
 npm run preflight            # checks every link in the chain
-TEST_BASE_URL=https://<your-project>.vercel.app npm run test:webhook
+TEST_BASE_URL=https://carecloud-voice-agent.vercel.app npm run test:webhook
 ```
 
 Then attach a phone number to the assistant in the Vapi dashboard under **Phone
@@ -284,7 +284,7 @@ npm test                # terminal 2 — all three suites
 instance:
 
 ```bash
-TEST_BASE_URL=https://<your-project>.vercel.app npm run test:webhook
+TEST_BASE_URL=https://carecloud-voice-agent.vercel.app npm run test:webhook
 ```
 
 `test:webhook` is the fast feedback loop — it exercises the entire tool layer

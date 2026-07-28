@@ -11,6 +11,7 @@
     "migrate": "node scripts/migrate.js",
     "seed": "node scripts/seed.js",
     "deploy:assistant": "node scripts/deployAssistant.js",
+    "vercel:env": "node scripts/pushVercelEnv.js",
     "preflight": "node scripts/preflight.js",
     "probe:voices": "node scripts/probeVoices.js",
     "test": "npm run test:persistence && npm run test:api && npm run test:webhook",
