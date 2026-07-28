@@ -155,6 +155,76 @@ async function main() {
   check("returns grouped digits for TTS",
     spokenPhone?.spoken?.phone_number === "415, 555, 0123", spokenPhone?.spoken);
 
+  // --- Giving up after repeated failures -----------------------------------
+  // The stopping rule is server-side precisely so it can be asserted here. The
+  // earlier version asked the model to count its own attempts, which does not
+  // work and could only be checked by making a phone call.
+  console.log("\nstuck-field handling");
+  const stuckCall = `${CALL_ID}-stuck`;
+
+  const attempt1 = await callTool("validateFields", { phone_number: "12" }, stuckCall);
+  check("1st failure just re-prompts", attempt1?.ok === false && !attempt1?.give_up, attempt1);
+
+  const attempt2 = await callTool("validateFields", { phone_number: "12" }, stuckCall);
+  check("2nd failure still re-prompts", attempt2?.ok === false && !attempt2?.give_up, attempt2);
+
+  const attempt3 = await callTool("validateFields", { phone_number: "12" }, stuckCall);
+  check("3rd failure gives up instead of looping", attempt3?.give_up === true, attempt3);
+  check("names the field it gave up on", (attempt3?.fields ?? []).includes("phone_number"), attempt3?.fields);
+  check("supplies a spoken hand-off line",
+    /call you back|someone from our office/i.test(attempt3?.say ?? ""), attempt3?.say);
+  check("tells the agent to end the call",
+    /endCall/.test(attempt3?.next_step ?? ""), attempt3?.next_step);
+
+  // Counters are per field, so unrelated fields are unaffected.
+  const otherField = await callTool("validateFields", { city: "Reno" }, stuckCall);
+  check("a different field is not penalized", otherField?.ok === true, otherField);
+
+  // A field that eventually succeeds is forgiven, so trouble early in a call
+  // doesn't trigger a hand-off much later.
+  const recoveryCall = `${CALL_ID}-recovery`;
+  await callTool("validateFields", { zip_code: "1" }, recoveryCall);
+  await callTool("validateFields", { zip_code: "1" }, recoveryCall);
+  const recovered = await callTool("validateFields", { zip_code: "94102" }, recoveryCall);
+  check("a valid answer clears the counter", recovered?.ok === true, recovered);
+  const afterRecovery = await callTool("validateFields", { zip_code: "1" }, recoveryCall);
+  check("count restarts after a success",
+    afterRecovery?.ok === false && !afterRecovery?.give_up, afterRecovery);
+
+  // Counters are scoped to one call, so a new caller starts clean.
+  const freshCall = await callTool("validateFields", { phone_number: "12" }, `${CALL_ID}-fresh`);
+  check("a different call starts from zero",
+    freshCall?.ok === false && !freshCall?.give_up, freshCall);
+
+  // "I still need your date of birth" is not a failed attempt to hear it. Without
+  // this distinction one partial registerPatient call would burn the budget for
+  // every required field at once and hang up on a caller who'd done nothing wrong.
+  const missingCall = `${CALL_ID}-missing`;
+  let lastMissing;
+  for (let i = 0; i < 4; i++) {
+    lastMissing = await callTool("registerPatient", { first_name: "Partial" }, missingCall);
+  }
+  check("absent fields never count as failed attempts",
+    lastMissing?.give_up !== true, lastMissing);
+  check("still reports what's missing after repeats",
+    (lastMissing?.errors ?? []).length > 0, lastMissing);
+
+  // registerPatient enforces the same rule as validateFields.
+  const registerStuck = `${CALL_ID}-register-stuck`;
+  let lastRegister;
+  for (let i = 0; i < 3; i++) {
+    lastRegister = await callTool(
+      "registerPatient",
+      { ...fullPatient(uniquePhone()), zip_code: "1" },
+      registerStuck
+    );
+  }
+  check("registerPatient also gives up on a repeatedly bad field",
+    lastRegister?.give_up === true, lastRegister);
+  check("nothing is saved when giving up", lastRegister?.saved === false, lastRegister);
+  check("reports whether the server ended the call",
+    typeof lastRegister?.call_ending === "boolean", lastRegister?.call_ending);
+
   // --- lookupPatientByPhone ------------------------------------------------
   console.log("\nlookupPatientByPhone");
   const phone = uniquePhone();

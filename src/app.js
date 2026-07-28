@@ -74,14 +74,22 @@ function verifySecret(req, res, next) {
 
 app.post("/vapi/webhook", verifySecret, async (req, res) => {
   const message = req.body?.message ?? {};
-  const callId = message.call?.id ?? req.body?.call?.id ?? null;
+  const call = message.call ?? req.body?.call ?? {};
+  const callId = call.id ?? null;
+
+  // Vapi's per-call control URL lets the server speak a final line and hang up.
+  // Used by the give-up path in tools.js, where relying on the model to end the
+  // call would mean relying on the component that has already broken down.
+  const controlUrl = call.monitor?.controlUrl ?? null;
 
   try {
     switch (message.type) {
       // Current tool-calling format.
       case "tool-calls": {
-        const calls = message.toolCallList ?? message.toolCalls ?? [];
-        const results = await Promise.all(calls.map((call) => runToolCall(call, callId)));
+        const toolCalls = message.toolCallList ?? message.toolCalls ?? [];
+        const results = await Promise.all(
+          toolCalls.map((toolCall) => runToolCall(toolCall, { callId, controlUrl }))
+        );
         return res.json({ results });
       }
 
@@ -89,7 +97,7 @@ app.post("/vapi/webhook", verifySecret, async (req, res) => {
       // works against this server.
       case "function-call": {
         const { name, parameters } = message.functionCall ?? {};
-        const result = await invokeTool(name, parameters ?? {}, callId);
+        const result = await invokeTool(name, parameters ?? {}, { callId, controlUrl });
         return res.json({ result: asToolResult(result) });
       }
 
@@ -144,18 +152,19 @@ app.post("/vapi/webhook", verifySecret, async (req, res) => {
 });
 
 /** Run one tool call from a `tool-calls` batch and shape Vapi's reply entry. */
-async function runToolCall(call, callId) {
-  const name = call.function?.name ?? call.name;
-  const args = parseArgs(call.function?.arguments ?? call.arguments);
-  const result = await invokeTool(name, args, callId);
-  return { toolCallId: call.id, result: asToolResult(result) };
+async function runToolCall(toolCall, context) {
+  const name = toolCall.function?.name ?? toolCall.name;
+  const args = parseArgs(toolCall.function?.arguments ?? toolCall.arguments);
+  const result = await invokeTool(name, args, context);
+  return { toolCallId: toolCall.id, result: asToolResult(result) };
 }
 
 /**
  * Dispatch to tools.js. A throwing tool is converted into a spoken-recoverable
  * error rather than a 500 — mid-call, the caller needs a sentence, not silence.
  */
-async function invokeTool(name, args, callId) {
+async function invokeTool(name, args, context = {}) {
+  const { callId } = context;
   const tool = tools[name];
   if (!tool) {
     log("tool.unknown", { summary: name });
@@ -165,7 +174,9 @@ async function invokeTool(name, args, callId) {
   log("tool.call", { summary: name, tool: name, args });
 
   try {
-    const result = await tool(args);
+    // Context carries the call id (for per-call state such as how many times a
+    // field has failed validation) and the control URL (to end the call).
+    const result = await tool(args, context);
 
     // Remember which patient this call is about, for transcript linking. Stored
     // in the database rather than in memory because the next tool call in the

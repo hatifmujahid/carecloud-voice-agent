@@ -20,7 +20,13 @@
 // Adding a tool means editing two files that must agree: the implementation
 // here and the JSON schema in scripts/deployAssistant.js.
 
-import { createPatient, findByPhone, updatePatient } from "./src/patients.js";
+import {
+  clearFieldFailures,
+  createPatient,
+  findByPhone,
+  recordFieldFailures,
+  updatePatient,
+} from "./src/patients.js";
 import {
   FIELD_LABELS,
   REQUIRED_FIELDS,
@@ -28,6 +34,7 @@ import {
   validatePatient,
 } from "./src/validation.js";
 import { bookSlot, listSlots } from "./src/appointments.js";
+import { sayAndEndCall } from "./src/vapiControl.js";
 import { log } from "./src/logger.js";
 
 // --- Spoken formatting -----------------------------------------------------
@@ -87,6 +94,76 @@ const firstErrors = (errors, limit = 2) =>
     say: e.message,
   }));
 
+// --- Giving up on a field --------------------------------------------------
+// A bad line means some fields simply cannot be captured, and an agent with no
+// stopping rule will ask forever. The count is kept server-side (see
+// src/patients.js) because a model can't reliably track "how many times have I
+// asked this?" across turns — the earlier version of this lived in the prompt and
+// did not work.
+
+const MAX_ATTEMPTS = 3;
+
+/**
+ * Record this round's failures and report any field that has now been asked too
+ * many times.
+ *
+ * Only fields the caller actually *provided* are counted. "I still need your date
+ * of birth" means it hasn't been asked for yet — counting that as a failed attempt
+ * would let one early registerPatient call with a partial payload burn the budget
+ * for every field at once.
+ *
+ * @param {object} provided the fields present in this tool call
+ * @returns {Promise<string[]>} fields to stop asking for
+ */
+async function registerFailures(callId, errors, provided) {
+  const fields = errors
+    .map((e) => e.field)
+    .filter(Boolean)
+    .filter((field) => Object.prototype.hasOwnProperty.call(provided ?? {}, field));
+
+  if (!callId || !fields.length) return [];
+
+  const counts = await recordFieldFailures(callId, fields);
+  return fields.filter((field) => (counts[field] ?? 0) >= MAX_ATTEMPTS);
+}
+
+/**
+ * Stop asking, say goodbye, and end the call.
+ *
+ * The hang-up is done by the server through Vapi's call control URL, not by asking
+ * the model to call endCall. This path exists because the conversation has already
+ * broken down; leaning on the model to end it correctly at that exact moment would
+ * be leaning on the part that is failing. If the control URL isn't available the
+ * result still instructs the model to end the call, so the behaviour degrades
+ * rather than disappearing.
+ */
+async function giveUp(fields, context = {}) {
+  const labels = fields.map((f) => FIELD_LABELS[f] ?? f);
+  const list =
+    labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels[0];
+
+  const farewell =
+    `I'm sorry — I'm having real trouble getting your ${list} clearly, and I don't want to guess ` +
+    `at it. I'll have someone from our office call you back to finish your registration. ` +
+    `Thanks for your patience, and sorry about that.`;
+
+  const ended = await sayAndEndCall(context.controlUrl, farewell);
+
+  return {
+    ok: false,
+    saved: false,
+    give_up: true,
+    fields,
+    call_ending: ended,
+    say: farewell,
+    next_step: ended
+      ? "The call is already being ended by the server, which will speak the `say` line. Do not " +
+        "say anything further and do not ask for that field again."
+      : "Stop asking for that field — the line will not carry it. Say the `say` line, then end the " +
+        "call with the endCall tool. Do not try again.",
+  };
+}
+
 // --- Tools -----------------------------------------------------------------
 
 export const tools = {
@@ -129,7 +206,7 @@ export const tools = {
    * back so the caller confirms what will actually be stored, not what the
    * agent thinks it heard.
    */
-  validateFields: async (args = {}) => {
+  validateFields: async (args = {}, context = {}) => {
     const fields = pickFields(args);
     if (!Object.keys(fields).length) {
       return { ok: false, message: "No fields were provided to validate." };
@@ -139,6 +216,11 @@ export const tools = {
     const result = validatePatient(fields, { partial: true });
 
     if (!result.ok) {
+      const exhausted = await registerFailures(context.callId, result.errors, fields);
+      if (exhausted.length) {
+        log("tool.give_up", { summary: exhausted.join(", "), call_id: context.callId });
+        return giveUp(exhausted, context);
+      }
       return {
         ok: false,
         errors: firstErrors(result.errors),
@@ -146,6 +228,10 @@ export const tools = {
           "Re-ask only for the listed field(s), using the wording in `say`. Keep everything else you already have.",
       };
     }
+
+    // These fields are settled — forget any earlier trouble with them, so a
+    // caller who eventually gets one right isn't penalized later in the call.
+    await clearFieldFailures(context.callId, Object.keys(result.value));
 
     return {
       ok: true,
@@ -160,7 +246,7 @@ export const tools = {
    * Final save. Validates the whole record, then writes it. Nothing partial is
    * ever written: either the caller is registered or they hear why not.
    */
-  registerPatient: async (args = {}) => {
+  registerPatient: async (args = {}, context = {}) => {
     const fields = pickFields(args);
 
     // Duplicate guard. `lookupPatientByPhone` should have caught this earlier,
@@ -189,6 +275,13 @@ export const tools = {
         errors: result.errors,
         attempted: fields,
       });
+
+      const exhausted = await registerFailures(context.callId, result.errors, fields);
+      if (exhausted.length) {
+        log("tool.give_up", { summary: exhausted.join(", "), call_id: context.callId });
+        return giveUp(exhausted, context);
+      }
+
       return {
         ok: false,
         saved: false,

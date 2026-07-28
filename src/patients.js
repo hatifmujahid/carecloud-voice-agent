@@ -223,6 +223,46 @@ export async function linkCallToPatient(callId, patientId) {
   );
 }
 
+// --- Per-call validation attempt tracking ----------------------------------
+// Why this lives here and not in the prompt: an LLM cannot reliably count "have
+// I now asked for this three times?" across conversational turns. Telling it to
+// try was the wrong instinct — the same one the prompt already forbids for date
+// validity. The server sees every attempt, so the server counts them.
+//
+// Stored on the call document so it survives between serverless invocations, and
+// disappears with the call rather than accumulating forever.
+
+/**
+ * Record a failed attempt for each named field and return the updated counts.
+ * @returns {Promise<Record<string, number>>}
+ */
+export async function recordFieldFailures(callId, fields) {
+  if (!callId || !fields?.length) return {};
+
+  const increments = {};
+  for (const field of fields) increments[`attempts.${field}`] = 1;
+
+  const calls = await collection("calls");
+  const doc = await calls.findOneAndUpdate(
+    { call_id: String(callId) },
+    { $inc: increments, $setOnInsert: { call_id: String(callId), created_at: nowIso() } },
+    { upsert: true, returnDocument: "after", projection: { attempts: 1 } }
+  );
+
+  return doc?.attempts ?? {};
+}
+
+/** Forget the failures for fields that have now come back valid. */
+export async function clearFieldFailures(callId, fields) {
+  if (!callId || !fields?.length) return;
+
+  const unset = {};
+  for (const field of fields) unset[`attempts.${field}`] = "";
+
+  const calls = await collection("calls");
+  await calls.updateOne({ call_id: String(callId) }, { $unset: unset });
+}
+
 export async function getCallPatientId(callId) {
   if (!callId) return null;
   const calls = await collection("calls");

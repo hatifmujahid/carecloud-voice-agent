@@ -122,8 +122,10 @@ scripts/migrate.js          creates collections, validators and indexes
 scripts/seed.js             two demo patients
 scripts/pushVercelEnv.js    copies .env into Vercel without printing values
 scripts/probeVoices.js      finds which voice IDs this Vapi account accepts
+src/vapiControl.js          server-initiated call control (say + hang up)
+
 scripts/testApi.js          53 assertions — REST layer
-scripts/testWebhook.js      63 assertions — voice tools, real Vapi payload shapes
+scripts/testWebhook.js      78 assertions — voice tools, real Vapi payload shapes
 scripts/testPersistence.js   8 assertions — survives a restart
 ```
 
@@ -240,9 +242,9 @@ variable with no values.
 | `npm run seed` | Insert two demo patients (idempotent) |
 | `npm run deploy:assistant` | Push the prompt, voice and tool schemas to Vapi |
 | `npm run preflight` | Verify the whole chain before placing a call |
-| `npm test` | All three suites — 124 assertions |
+| `npm test` | All three suites — 139 assertions |
 | `npm run test:api` | REST layer only (53) |
-| `npm run test:webhook` | Voice tools only (63) |
+| `npm run test:webhook` | voice tools only (78) |
 | `npm run test:persistence` | Restart survival only (8) |
 | `npm run vercel:env` | Copy the needed `.env` keys into Vercel, without printing them |
 | `npm run probe:voices` | List which voice IDs this Vapi account actually accepts |
@@ -328,9 +330,9 @@ npm test                # terminal 2 — all three suites
 | --- | --- | --- |
 | `npm run test:persistence` | Data survives a restart: writes a record, closes the connection, re-reads it **from a separate process** — the same boundary two serverless invocations cross | 8 |
 | `npm run test:api` | Every endpoint, both envelopes, all six status codes, filters, soft-delete semantics, server-side normalization | 53 |
-| `npm run test:webhook` | Every voice tool, using real Vapi payload shapes (arguments as a JSON *string*), duplicate detection, transcript linking, appointment booking and cancellation, auth | 63 |
+| `npm run test:webhook` | Every voice tool, using real Vapi payload shapes (arguments as a JSON *string*), duplicate detection, transcript linking, appointment booking and cancellation, auth | 78 |
 
-**124 assertions, all passing.** The webhook suite also runs against a deployed
+**139 assertions, all passing.** The webhook suite also runs against a deployed
 instance:
 
 ```bash
@@ -486,13 +488,43 @@ cross-checks them and fails if they drift.
 | A tool throws unexpectedly | `src/app.js` converts it to a spoken-recoverable message and still returns HTTP 200 — a webhook 500 would stall the call rather than degrade it. |
 | Call drops mid-registration | Nothing partial is ever written, so there's no half-record. `end-of-call-report` logs the reason and stores the transcript. |
 | Caller talks over the agent | `stopSpeakingPlan` interrupts on 2+ words, so a long readback can be cut off, but a one-word "mhm" doesn't derail it. |
-| A field can't be heard, repeatedly | After three failed attempts on the same field the agent stops, explains the line is making it difficult, and hands off to a callback. Without this rule an agent loops indefinitely. |
+| A field can't be heard, repeatedly | After three failed attempts on the *same* field, the server says a closing line and ends the call itself via Vapi's control URL. Counting happens server-side and only counts fields the caller actually provided — "I still need your date of birth" is not a failed attempt to hear it. See the note below. |
 | Caller refuses a required field | One brief explanation of why it's needed; if they still decline, the agent says registration can't be completed by phone and offers a callback rather than pressing. |
 | Silence while a tool runs | The agent speaks a bridging line before every tool call, so a slow round trip or a cold start doesn't read as a dropped call. |
 | Same person calls twice | `lookupPatientByPhone` matches on phone number and the agent offers to update. `registerPatient` independently refuses to create a duplicate unless `allow_duplicate` is set. |
 | Two callers want the same appointment slot | `slot_id` is the primary key, so the second insert fails and the agent is told to offer another time. |
 | Tool calls land on different instances | All cross-call state is in the database, so it doesn't matter which instance serves which request. |
 | Unauthenticated webhook request | 401 when `VAPI_SERVER_SECRET` is set. |
+
+### Why the stopping rule lives in the server
+
+Worth calling out, because the first attempt failed and the fix is the same
+principle the rest of the system is built on.
+
+The original rule was a line in the system prompt: *"if the same field fails three
+times, stop asking and hand off."* **It didn't work.** Models are unreliable at
+tracking that kind of state across conversational turns — which is exactly why this
+prompt already forbids the agent from judging whether a date is valid. The rule
+contradicted the project's own principle that the server owns truth.
+
+So the count moved into `tools.js`, stored per field on the call record:
+
+- **The server counts.** Three failures on one field and `validateFields` /
+  `registerPatient` return `give_up: true` instead of another re-prompt.
+- **Only provided fields count.** A missing field means it hasn't been asked for
+  yet. Counting those would let one partial `registerPatient` call burn the budget
+  for every required field at once and hang up on a caller who did nothing wrong.
+- **Success forgives.** A field that eventually validates has its counter cleared,
+  so early trouble doesn't trigger a hand-off twenty questions later.
+- **The server ends the call**, via Vapi's control URL (`src/vapiControl.js`),
+  rather than asking the model to call `endCall`. This path exists *because* the
+  conversation has broken down; depending on the model to exit cleanly at that
+  moment would be depending on the part that is already failing. If the control URL
+  is unavailable it falls back to instructing the model, so the behaviour degrades
+  instead of vanishing.
+
+The payoff is that a rule which previously could only be checked by making a phone
+call is now deterministic and covered by 15 assertions in `scripts/testWebhook.js`.
 
 ### Observability
 
@@ -519,7 +551,7 @@ linked to the patient created on that call, and readable via `GET /calls`.
 - **Multi-language** — the prompt switches to Spanish on "hablo español" and records the preference.
 - **Call transcripts** — stored per call and linked to the patient record.
 - **Dashboard** — `/dashboard`, live-refreshing, all fields, HTML-escaped.
-- **Automated tests** — 124 assertions across three suites.
+- **Automated tests** — 139 assertions across three suites.
 
 ---
 

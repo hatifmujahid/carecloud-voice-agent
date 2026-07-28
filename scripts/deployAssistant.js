@@ -63,10 +63,15 @@ if (!SERVER_URL) {
 //    The agent is told to speak a bridging line *before* calling a tool, which
 //    costs nothing and removes the perceived gap entirely.
 //
-// 7. ALWAYS AN EXIT. Without a stopping rule an agent will re-ask a field it
-//    can't hear forever, which is the worst version of a bad phone line. Three
-//    attempts, then it hands off gracefully — and a caller who refuses a required
-//    field gets one explanation, not a fight.
+// 7. ALWAYS AN EXIT — BUT THE SERVER COUNTS, NOT THE MODEL. Without a stopping
+//    rule an agent will re-ask a field it can't hear forever. The first version of
+//    this rule told the model "stop after three attempts", and it did not work:
+//    LLMs are unreliable at tracking that kind of state across turns, which is the
+//    same reason this prompt forbids them from judging date validity. So tools.js
+//    keeps the per-field count on the call record and returns give_up: true when it
+//    is reached; the prompt's only job is to obey that flag. The rule is now
+//    deterministic and covered by scripts/testWebhook.js instead of needing a
+//    phone call to verify.
 
 const SYSTEM_PROMPT = `
 # Role
@@ -177,15 +182,14 @@ and immediate, whenever it arrives — even after the confirmation readback.
 
 You must always have a way out. Never let the call become a loop.
 
-- If the same field fails validation three times, stop asking for it. Tell the
-  caller the line is making it hard to get that detail right, that someone will
-  follow up to finish the registration, and end the call politely.
+- Do NOT try to count how many times you've asked for something. The server keeps
+  that count for you. When a tool returns give_up: true, it has decided that field
+  cannot be captured on this call: say its "say" line in your own words, do not ask
+  for that field again, and end the call with the endCall tool.
 - If the caller declines to give a required field, explain once why you need it —
   "I need that one to create your chart." If they still decline, tell them you
   can't finish the registration over the phone, offer to have someone call them
   back, and end the call. Don't keep pressing.
-- If you have asked the same question three times for any reason, move on or wrap
-  up. Repeating a fourth time is worse than ending the call gracefully.
 
 # Rules you must not break
 
