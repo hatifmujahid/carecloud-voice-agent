@@ -2,45 +2,49 @@
 // Service layer: the single place patient records are read and written.
 //
 // Both front doors go through here — the REST API (src/api.js) and the voice
-// agent's tools (tools.js). The brief allows the agent to either call the REST
-// API over HTTP or invoke the same service layer directly; this project does the
+// agent's tools (tools.js). The brief allows the agent to either call the REST API
+// over HTTP or invoke the same service layer directly; this project does the
 // latter, so a tool call during a live phone call doesn't depend on the server
 // being able to reach its own public URL. Same validation, same constraints, one
 // code path.
-//
-// Everything is async because the database is over the network (see src/db.js).
 //
 // Convention: expected failures are returned as `{ ok: false, ... }` so callers
 // can map them to a status code or a spoken sentence. Unexpected failures (a real
 // database error) throw and surface as a 500.
 
 import { randomUUID } from "node:crypto";
-import { get, migrate, nowIso, query, run, toBinding } from "./db.js";
+import { collection, nowIso, toBinding, WITHOUT_ID } from "./db.js";
 import {
   validatePatient,
   validators,
   WRITABLE_FIELDS,
+  OPTIONAL_FIELDS,
   FIELD_LABELS,
   formatDob,
   formatPhone,
 } from "./validation.js";
 
-// --- Row -> API shape ------------------------------------------------------
+// Case-insensitive comparison, used for the ?last_name= filter. Collation is the
+// right tool here — a regex would need escaping and wouldn't use the index.
+const CASE_INSENSITIVE = { locale: "en", strength: 2 };
+
+// --- Document -> API shape -------------------------------------------------
 
 /**
- * Rows are already the API shape, but `display` is attached for the humans: the
- * dashboard and the agent's spoken readback both need MM/DD/YYYY and
- * (415) 555-0123 rather than the canonical storage formats.
+ * Documents are already the API shape (`_id` is projected away at query time),
+ * but `display` is attached for the humans: the dashboard and the agent's spoken
+ * readback both need MM/DD/YYYY and (415) 555-0123 rather than the canonical
+ * storage formats.
  */
-function serialize(row) {
-  if (!row) return null;
+function serialize(doc) {
+  if (!doc) return null;
   return {
-    ...row,
+    ...doc,
     display: {
-      full_name: `${row.first_name} ${row.last_name}`,
-      date_of_birth: formatDob(row.date_of_birth),
-      phone_number: formatPhone(row.phone_number),
-      emergency_contact_phone: formatPhone(row.emergency_contact_phone),
+      full_name: `${doc.first_name} ${doc.last_name}`,
+      date_of_birth: formatDob(doc.date_of_birth),
+      phone_number: formatPhone(doc.phone_number),
+      emergency_contact_phone: formatPhone(doc.emergency_contact_phone),
     },
   };
 }
@@ -59,18 +63,12 @@ function serialize(row) {
  *          | { ok: false, errors: Array<{field: string, message: string}> }>}
  */
 export async function listPatients(filters = {}) {
-  await migrate();
-
-  const where = ["(deleted_at IS NULL OR ? = 1)"];
-  const params = [filters.include_deleted ? 1 : 0];
+  const query = {};
   const errors = [];
 
-  if (filters.last_name) {
-    // Case-insensitive exact match — predictable for an API client. A prefix
-    // search would be friendlier for the dashboard but ambiguous here.
-    where.push("last_name = ? COLLATE NOCASE");
-    params.push(String(filters.last_name).trim());
-  }
+  if (!filters.include_deleted) query.deleted_at = null;
+
+  if (filters.last_name) query.last_name = String(filters.last_name).trim();
 
   for (const field of ["date_of_birth", "phone_number"]) {
     if (!filters[field]) continue;
@@ -79,47 +77,44 @@ export async function listPatients(filters = {}) {
       errors.push({ field, message: `Invalid ${FIELD_LABELS[field]} filter.` });
       continue;
     }
-    where.push(`${field} = ?`);
-    params.push(result.value);
+    query[field] = result.value;
   }
 
   if (errors.length) return { ok: false, errors };
 
-  const rows = await query(
-    `SELECT * FROM patients WHERE ${where.join(" AND ")} ORDER BY created_at DESC`,
-    params
-  );
+  const patients = await collection("patients");
+  const docs = await patients
+    .find(query, WITHOUT_ID)
+    .collation(CASE_INSENSITIVE) // makes ?last_name= case-insensitive
+    .sort({ created_at: -1 })
+    .toArray();
 
-  return { ok: true, patients: rows.map(serialize) };
+  return { ok: true, patients: docs.map(serialize) };
 }
 
 export async function getPatient(patientId, { includeDeleted = false } = {}) {
   if (!patientId) return null;
-  await migrate();
-  const row = await get(
-    `SELECT * FROM patients
-     WHERE patient_id = ? AND (deleted_at IS NULL OR ? = 1)`,
-    [String(patientId), includeDeleted ? 1 : 0]
-  );
-  return serialize(row);
+  const patients = await collection("patients");
+  const query = { patient_id: String(patientId) };
+  if (!includeDeleted) query.deleted_at = null;
+  return serialize(await patients.findOne(query, WITHOUT_ID));
 }
 
 /**
- * Duplicate detection. The voice agent calls this as soon as it has a phone
- * number so it can offer to update an existing record instead of creating a
- * second one for the same person.
+ * Duplicate detection. The voice agent calls this as soon as it has a phone number
+ * so it can offer to update an existing record instead of creating a second one
+ * for the same person.
  */
 export async function findByPhone(phone) {
   const result = validators.phone_number(phone);
   if (!result.ok) return null;
-  await migrate();
-  const row = await get(
-    `SELECT * FROM patients
-     WHERE phone_number = ? AND deleted_at IS NULL
-     ORDER BY created_at DESC LIMIT 1`,
-    [result.value]
+
+  const patients = await collection("patients");
+  const doc = await patients.findOne(
+    { phone_number: result.value, deleted_at: null },
+    { ...WITHOUT_ID, sort: { created_at: -1 } }
   );
-  return serialize(row);
+  return serialize(doc);
 }
 
 // --- Writes ----------------------------------------------------------------
@@ -133,22 +128,24 @@ export async function createPatient(input) {
   const validated = validatePatient(input, { partial: false });
   if (!validated.ok) return { ok: false, errors: validated.errors };
 
-  await migrate();
-
+  const timestamp = nowIso();
   const record = {
     patient_id: randomUUID(),
     ...validated.value,
-    created_at: nowIso(),
-    updated_at: nowIso(),
+    created_at: timestamp,
+    updated_at: timestamp,
     deleted_at: null,
   };
 
-  const columns = Object.keys(record);
-  await run(
-    `INSERT INTO patients (${columns.join(", ")})
-     VALUES (${columns.map(() => "?").join(", ")})`,
-    columns.map((c) => toBinding(record[c]))
-  );
+  // Every optional field is stored explicitly as null rather than omitted, so the
+  // API response shape is identical for every record and a cleared field is
+  // distinguishable from one that was never set.
+  for (const field of OPTIONAL_FIELDS) {
+    record[field] = toBinding(record[field]);
+  }
+
+  const patients = await collection("patients");
+  await patients.insertOne(record);
 
   return { ok: true, patient: await getPatient(record.patient_id) };
 }
@@ -172,18 +169,20 @@ export async function updatePatient(patientId, input) {
     return { ok: false, errors: [{ field: null, message: "No updatable fields were provided." }] };
   }
 
-  await run(
-    `UPDATE patients
-     SET ${changes.map((f) => `${f} = ?`).join(", ")}, updated_at = ?
-     WHERE patient_id = ? AND deleted_at IS NULL`,
-    [...changes.map((f) => toBinding(validated.value[f])), nowIso(), String(patientId)]
+  const update = { updated_at: nowIso() };
+  for (const field of changes) update[field] = toBinding(validated.value[field]);
+
+  const patients = await collection("patients");
+  await patients.updateOne(
+    { patient_id: String(patientId), deleted_at: null },
+    { $set: update }
   );
 
   return { ok: true, patient: await getPatient(patientId), changed: changes };
 }
 
 /**
- * Soft delete — sets `deleted_at` and leaves the row in place, per the brief.
+ * Soft delete — sets `deleted_at` and leaves the document in place, per the brief.
  * Deleting an already-deleted record reports notFound, since it's no longer
  * visible.
  */
@@ -192,10 +191,10 @@ export async function softDeletePatient(patientId) {
   if (!existing) return { ok: false, notFound: true };
 
   const timestamp = nowIso();
-  await run(
-    `UPDATE patients SET deleted_at = ?, updated_at = ?
-     WHERE patient_id = ? AND deleted_at IS NULL`,
-    [timestamp, timestamp, String(patientId)]
+  const patients = await collection("patients");
+  await patients.updateOne(
+    { patient_id: String(patientId), deleted_at: null },
+    { $set: { deleted_at: timestamp, updated_at: timestamp } }
   );
 
   return { ok: true, patient: await getPatient(patientId, { includeDeleted: true }) };
@@ -213,60 +212,78 @@ export async function softDeletePatient(patientId) {
  */
 export async function linkCallToPatient(callId, patientId) {
   if (!callId || !patientId) return;
-  await migrate();
-  await run(
-    `INSERT INTO calls (call_id, patient_id, created_at)
-     VALUES (?, ?, ?)
-     ON CONFLICT (call_id) DO UPDATE SET patient_id = excluded.patient_id`,
-    [String(callId), String(patientId), nowIso()]
+  const calls = await collection("calls");
+  await calls.updateOne(
+    { call_id: String(callId) },
+    {
+      $set: { patient_id: String(patientId) },
+      $setOnInsert: { call_id: String(callId), created_at: nowIso() },
+    },
+    { upsert: true }
   );
 }
 
 export async function getCallPatientId(callId) {
   if (!callId) return null;
-  await migrate();
-  const row = await get("SELECT patient_id FROM calls WHERE call_id = ?", [String(callId)]);
-  return row?.patient_id ?? null;
+  const calls = await collection("calls");
+  const doc = await calls.findOne({ call_id: String(callId) }, { projection: { patient_id: 1 } });
+  return doc?.patient_id ?? null;
 }
 
 /**
- * Store a call's summary/transcript. Called from the `end-of-call-report`
- * webhook. Preserves any patient_id already linked during the call. Best-effort:
- * a failure to log a transcript must never look like a failed registration.
+ * Store a call's summary/transcript. Called from the `end-of-call-report` webhook.
+ * Preserves any patient_id already linked during the call — hence the conditional
+ * $set rather than overwriting it with a possibly-null value. Best-effort: a
+ * failure to log a transcript must never look like a failed registration.
  */
 export async function recordCall({ callId, patientId, endedReason, summary, transcript }) {
-  await migrate();
-  await run(
-    `INSERT INTO calls (call_id, patient_id, ended_reason, summary, transcript, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT (call_id) DO UPDATE SET
-       patient_id   = COALESCE(excluded.patient_id, calls.patient_id),
-       ended_reason = excluded.ended_reason,
-       summary      = excluded.summary,
-       transcript   = excluded.transcript`,
-    [
-      toBinding(callId) ?? randomUUID(),
-      toBinding(patientId),
-      toBinding(endedReason),
-      toBinding(summary),
-      toBinding(transcript),
-      nowIso(),
-    ]
+  const id = String(callId ?? randomUUID());
+  const calls = await collection("calls");
+
+  const set = {
+    ended_reason: toBinding(endedReason),
+    summary: toBinding(summary),
+    transcript: toBinding(transcript),
+  };
+  if (patientId) set.patient_id = String(patientId);
+
+  await calls.updateOne(
+    { call_id: id },
+    { $set: set, $setOnInsert: { call_id: id, created_at: nowIso() } },
+    { upsert: true }
   );
 }
 
+/**
+ * Recent calls with the patient's name joined in, for GET /calls. Uses $lookup so
+ * it stays one round trip rather than N+1 queries.
+ */
 export async function listCalls(limit = 50) {
-  await migrate();
-  return query(
-    `SELECT c.*, p.first_name, p.last_name
-     FROM calls c LEFT JOIN patients p ON p.patient_id = c.patient_id
-     ORDER BY c.created_at DESC LIMIT ?`,
-    [Math.min(Number(limit) || 50, 200)]
-  );
+  const calls = await collection("calls");
+  return calls
+    .aggregate([
+      { $sort: { created_at: -1 } },
+      { $limit: Math.min(Number(limit) || 50, 200) },
+      {
+        $lookup: {
+          from: "patients",
+          localField: "patient_id",
+          foreignField: "patient_id",
+          as: "patient",
+        },
+      },
+      {
+        $addFields: {
+          first_name: { $first: "$patient.first_name" },
+          last_name: { $first: "$patient.last_name" },
+        },
+      },
+      { $project: { _id: 0, patient: 0 } },
+    ])
+    .toArray();
 }
 
 export async function countPatients() {
-  await migrate();
-  const row = await get("SELECT COUNT(*) AS n FROM patients WHERE deleted_at IS NULL");
-  return Number(row?.n ?? 0);
+  const patients = await collection("patients");
+  return patients.countDocuments({ deleted_at: null });
 }

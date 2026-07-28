@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { tools } from "../tools.js";
 import { api } from "./api.js";
 import { getCallPatientId, linkCallToPatient, recordCall } from "./patients.js";
-import { DB_DESCRIPTION } from "./db.js";
+import { CONFIG_ERROR, DB_DESCRIPTION, ping } from "./db.js";
 import { log } from "./logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,8 +28,27 @@ app.use(express.json({ limit: "2mb" }));
 
 // --- Health & static -------------------------------------------------------
 
-app.get("/health", (_req, res) => res.json({ ok: true, database: DB_DESCRIPTION }));
+/**
+ * Health check that actually checks. It reports a bad database configuration or
+ * an unreachable database as 503 with the reason, rather than letting every route
+ * fail with a stack trace — which is what happens when connection setup is done
+ * at import time.
+ */
+app.get("/health", async (_req, res) => {
+  if (CONFIG_ERROR) {
+    return res.status(503).json({ ok: false, database: DB_DESCRIPTION, error: CONFIG_ERROR });
+  }
+  const result = await ping();
+  return res
+    .status(result.ok ? 200 : 503)
+    .json({ ok: result.ok, database: DB_DESCRIPTION, ...(result.ok ? {} : { error: result.error }) });
+});
+
 app.get("/", (_req, res) => res.redirect("/dashboard"));
+
+// Browsers request these on every dashboard visit. Answering 204 keeps them out
+// of the logs instead of generating a 404 envelope per page view.
+app.get(["/favicon.ico", "/favicon.png"], (_req, res) => res.status(204).end());
 
 // Served explicitly rather than left to express.static, which would 301
 // /dashboard -> /dashboard/ and make a pasted URL or a curl look like a failure.

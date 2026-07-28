@@ -68,7 +68,7 @@ back from the same number to see it recognise you and offer to update instead.
             └──────┬───────┬──────┘
                    ▼       ▼
       ┌────────────────┐  ┌──────────────┐
-      │ src/validation │  │  src/db.js   │──► Turso (libSQL, over HTTP)
+      │ src/validation │  │  src/db.js   │──► MongoDB Atlas
       │  shared rules  │  │  schema      │
       └────────────────┘  └──────────────┘
 ```
@@ -108,36 +108,44 @@ One app definition, so the two runtimes can't drift.
 | Transcriber | **Deepgram `nova-2-phonecall`** | The hard part of this call is names, street names and spelled-out letters over 8 kHz phone audio. The phonecall-tuned model is meaningfully better than the general one; `numerals: true` keeps digits as digits so validators see `4155550123`, not "four one five...". |
 | LLM | **OpenAI GPT-4o** | Needs to follow a long structured intake prompt *and* a six-tool contract while sounding natural. `gpt-4o-mini` drifted off the readback step and skipped `lookupPatientByPhone` in testing; the latency cost is worth it. Configurable via `LLM_MODEL`. |
 | Backend | **Node 22 + Express** | Vapi's webhook contract is plain JSON, and an Express app *is* a `(req, res)` handler — so the same code runs as a local server and as a Vercel function with no adapter. |
-| Database | **Turso (libSQL)** | Keeps SQLite's dialect — the same `CHECK` constraints, `strftime`, and SQL — while moving storage over the network, which is what serverless requires. See below. |
+| Database | **MongoDB Atlas** | A managed network database, which is what serverless requires — and the brief permits any relational or document store. Schema is still enforced at the database level via `$jsonSchema` validators. See below. |
 | Hosting | **Vercel** | Requested. What that costs and how it's mitigated is documented under [trade-offs](#known-limitations-and-trade-offs). |
 | Dashboard | Vanilla HTML + `fetch` | Zero dependencies, no build, served from Vercel's CDN rather than a function. |
 
-### Why libSQL/Turso rather than a SQLite file
+### Why a network database, and what it cost
 
 This is the decision Vercel forces. Vercel's filesystem is **read-only apart from
 an ephemeral `/tmp`**, and each request may be served by a different instance. A
-file-backed SQLite database there would:
+file-backed database there would either crash on startup or — if pointed at
+`/tmp` — give every instance its own empty copy, so "register Jane Doe on call 1,
+query her on call 2" fails. That's the requirement the brief states most plainly.
 
-- crash at import when creating its directory, or
-- if pointed at `/tmp`, give every instance its own empty database — so "register
-  Jane Doe on call 1, query her on call 2" fails, which is the requirement the
-  brief states most plainly.
+**Schema is still enforced in the database, not just in application code.** That
+property mattered enough to preserve: the voice agent and the REST API are two
+separate front doors, and neither should be the only gatekeeper. So the
+collections carry `$jsonSchema` validators — the `sex` enum, the 10-digit phone
+pattern, the two-letter state, ZIP shape, required fields, and string lengths are
+all rejected by MongoDB itself. Unique indexes are load-bearing too:
+`appointments.slot_id` is what actually prevents two callers being given the same
+slot, and `calls.call_id` is what makes the transcript upsert idempotent.
 
-libSQL is SQLite's fork, so moving to Turso changed the *transport*, not the SQL:
-the schema, the `CHECK` constraints and every query are unchanged. What did change
-is that all database access became **async**, which is why the service layer is
-async throughout.
+**One honest regression.** A regex can enforce that `date_of_birth` *looks* like
+`YYYY-MM-DD`, but not that it's a real calendar date — `1990-02-30` matches the
+pattern. A SQL `CHECK (date_of_birth IS strftime('%Y-%m-%d', date_of_birth))`
+rejected that outright. `src/validation.js` still catches it by round-tripping
+through a `Date`, so an impossible date cannot get in through either front door;
+what's lost is the database as a *second* line of defence for that one rule. It's
+called out in `src/db.js` where the validator is defined.
 
-One connection string covers both environments, so there's no separate local mode
-to keep in sync:
+Two other consequences, both handled:
 
-```bash
-DATABASE_URL=file:./data/patients.db      # local dev + tests, no account needed
-DATABASE_URL=libsql://<db>.turso.io       # production, + DATABASE_AUTH_TOKEN
-```
-
-`src/db.js` picks the pure-HTTP client for remote URLs and the native driver for
-local files, so the serverless bundle carries no native binary.
+- **Everything became async.** Network access rippled through the service layer,
+  which is why `src/patients.js` is async throughout.
+- **The client is cached per process.** A fresh `MongoClient` per invocation would
+  exhaust Atlas's connection limit, since every serverless instance opens its own
+  pool. `src/db.js` memoizes the connection promise at module scope, and does no
+  I/O at import time so a bad connection string is *reported* rather than crashing
+  every route.
 
 ### Serverless also killed all in-process state
 
@@ -162,14 +170,16 @@ git clone <this repo>
 cd carecloud-voice-agent
 npm install
 
-cp .env.example .env       # then fill in VAPI_API_KEY
-npm run migrate            # create the schema
+cp .env.example .env       # then fill in MONGODB_URI and VAPI_API_KEY
+npm run migrate            # create collections, validators and indexes
 npm run seed               # optional: two demo patients
 npm run dev                # http://localhost:3000
 ```
 
-Local development needs no Turso account — the default `DATABASE_URL` is a plain
-file.
+`MONGODB_URI` is required — there is no local file fallback, deliberately, because
+silently defaulting to another store is how a deployment ends up looking healthy
+while quietly losing data. Local development points at the same Atlas cluster; set
+`MONGODB_DB=carecloud_test` to keep test data in a separate database.
 
 ### Environment variables
 
@@ -177,8 +187,8 @@ file.
 | --- | --- | --- |
 | `VAPI_API_KEY` | **yes** | Vapi private key. Dashboard → Organization → API Keys. |
 | `SERVER_URL` | **yes** | Public HTTPS URL of the webhook, including the `/vapi/webhook` path. |
-| `DATABASE_URL` | **yes in prod** | `file:./data/patients.db` locally; `libsql://…` on Vercel. |
-| `DATABASE_AUTH_TOKEN` | **yes in prod** | Turso token. Not needed for a `file:` URL. |
+| `MONGODB_URI` | **yes** | MongoDB Atlas connection string (`mongodb+srv://…`). Required locally and in production. |
+| `MONGODB_DB` | no | Database name. Defaults to the URI path, or `carecloud`. |
 | `VAPI_SERVER_SECRET` | recommended | Shared secret; the server rejects webhooks without a matching `x-vapi-secret`. Without it the webhook is open to anyone who learns the URL. |
 | `VAPI_ASSISTANT_ID` | after first deploy | Set it, or every deploy creates a *duplicate* assistant instead of updating. |
 | `PORT` | no | Local only. Default `3000`. |
@@ -195,20 +205,19 @@ variable with no values.
 
 ## Deploying to Vercel
 
-**1. Create the database.**
+**1. Prepare the database.** In MongoDB Atlas:
+
+- Create a database user with the **`readWriteAnyDatabase`** role (or
+  `readWrite` + `dbAdmin` on this database). `dbAdmin` is what allows the
+  `$jsonSchema` validators to be applied — without it the app still runs and warns,
+  falling back to application-level validation only.
+- Under **Network Access**, add `0.0.0.0/0`. Vercel has no static egress IP on the
+  Hobby plan, so an IP-restricted allowlist will refuse the deployed function.
+
+**2. Create the collections, validators and indexes:**
 
 ```bash
-npm i -g turso                      # or: brew install tursodatabase/tap/turso
-turso auth login
-turso db create carecloud
-turso db show carecloud --url       # -> libsql://carecloud-<org>.turso.io
-turso db tokens create carecloud    # -> the auth token
-```
-
-**2. Create the schema.** Point `.env` at Turso and run the migration once:
-
-```bash
-DATABASE_URL=libsql://… DATABASE_AUTH_TOKEN=… npm run migrate
+npm run migrate      # with MONGODB_URI set in .env
 ```
 
 **3. Deploy.**
@@ -223,7 +232,7 @@ vercel --prod
 Environment Variables), or from the CLI:
 
 ```bash
-for KEY in VAPI_API_KEY VAPI_SERVER_SECRET DATABASE_URL DATABASE_AUTH_TOKEN \
+for KEY in VAPI_API_KEY VAPI_SERVER_SECRET MONGODB_URI MONGODB_DB \
            SERVER_URL LLM_MODEL TRANSCRIBER_MODEL VOICE_PROVIDER VOICE_ID; do
   vercel env add $KEY production
 done
@@ -285,10 +294,11 @@ consume the schedule.
 
 `npm run preflight` checks the links a test can't: that `SERVER_URL` isn't stale,
 that the deployed assistant's declared tools all exist in `tools.js`, that a phone
-number points at this assistant, and — specifically for this deployment — that
-`DATABASE_URL` isn't a local file while `SERVER_URL` is a serverless host. That
-last one is the mistake that silently loses every record and looks fine until the
-reviewer calls back.
+number points at this assistant, and that the database is actually reachable.
+
+`/health` is a real check, not a constant: it returns **503 with the reason** if
+the database is misconfigured or unreachable, so a broken deploy is diagnosable
+from one request instead of a wall of 500s.
 
 ---
 
@@ -335,11 +345,14 @@ enforced **in the schema as well as in application code** — see `src/db.js`.
 Two storage decisions, both normalized on the way in:
 
 - `date_of_birth` is stored **ISO `YYYY-MM-DD`** so it sorts and range-queries
-  correctly, and is a real date — `CHECK (date_of_birth IS strftime(...))` rejects
-  `2023-02-30` at the database level. The brief specifies `MM/DD/YYYY`, which is
-  an *input* format: accepted on input, and returned under `display` for humans.
-- `phone_number` is stored as **10 bare digits** so lookups match regardless of
-  how a caller or client formatted it.
+  correctly. The brief specifies `MM/DD/YYYY`, which is an *input* format: accepted
+  on input, and returned under `display` for humans.
+- `phone_number` is stored as **10 bare digits** so lookups match regardless of how
+  a caller or client formatted it.
+
+Mongo's `_id` is treated as an implementation detail and projected out of every
+response; `patient_id` is a UUID with a unique index, so the API contract doesn't
+leak the storage engine.
 
 Every response carries a `display` block with `MM/DD/YYYY` and `(415) 555-0123`
 forms, so the dashboard and the spoken readback don't each reinvent formatting.
@@ -450,7 +463,7 @@ linked to the patient created on that call, and readable via `GET /calls`.
 
 **Cold starts are the real cost of running this on Vercel.** A serverless function
 that hasn't been hit recently takes roughly 1–3 seconds to wake, plus the first
-Turso round trip. If that lands on a tool call, the caller hears silence
+Atlas round trip. If that lands on a tool call, the caller hears silence
 mid-sentence. Mitigations in place: `migrate()` is memoized so schema setup costs
 one round trip per instance rather than per request, the dashboard is served from
 the CDN so it never wakes the function, and `maxDuration` is 30s so a slow start
@@ -459,10 +472,24 @@ long-running host (Fly.io, Railway) or Vercel's paid always-warm options. **This
 is the main reason a container host would suit this workload better than
 serverless**, and it's a deliberate, requested trade-off rather than an oversight.
 
-- **Every database call is now a network round trip.** Turso is fast, but a local
-  SQLite file was microseconds. It shows up as a few tens of milliseconds per tool
-  call — acceptable on a phone call, but it is strictly slower than the file-backed
-  version this replaced.
+- **Every database call is now a network round trip.** Atlas is fast, but a local
+  file was microseconds. It shows up as a few tens of milliseconds per tool call —
+  acceptable on a phone call, but strictly slower than an embedded database, and it
+  adds a second network dependency that can fail independently of the host.
+- **`0.0.0.0/0` on the Atlas IP allowlist.** Vercel has no static egress IP on the
+  Hobby plan, so the database is reachable from anywhere that has the connection
+  string. The database user's credentials are the only control. Acceptable for a
+  demo with fictional data; for real PHI this would need a VPC peering or Private
+  Endpoint setup.
+- **`$jsonSchema` can't check calendar validity.** `1990-02-30` matches the
+  `YYYY-MM-DD` pattern, so the database accepts it where a SQL `CHECK` with
+  `strftime` would not. `src/validation.js` rejects it on both write paths, so it
+  can't actually get in — but the database is no longer a second line of defence
+  for that specific rule.
+- **Validators need `dbAdmin`.** With a `readWrite`-only Atlas user the app logs a
+  warning and runs with application-level validation only, rather than refusing to
+  start. Check `npm run migrate` output — it prints `validator: yes/no` per
+  collection.
 - **No authentication on the REST API.** Anyone with the URL can read and modify
   patient records. Unacceptable for real PHI; out of scope per the brief's explicit
   "no HIPAA" note, and the demo data is fictional. Would be API-key or JWT
@@ -481,7 +508,8 @@ serverless**, and it's a deliberate, requested trade-off rather than an oversigh
   the *conversation* but not a non-US address.
 - **No rate limiting or spend cap.** `maxDurationSeconds: 900` bounds a single
   call, but nothing bounds cost across many.
-- **Turso's free tier** has row-read limits. Fine for a demo, not for volume.
+- **Atlas free tier (M0)** caps connections and shares CPU. Fine for a demo, not
+  for volume.
 
 ## Next steps
 

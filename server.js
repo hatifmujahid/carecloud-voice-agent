@@ -19,7 +19,7 @@ try {
   await migrate();
 } catch (err) {
   console.error(`\nCould not reach the database (${DB_DESCRIPTION}):\n  ${err.message}\n`);
-  console.error("Check DATABASE_URL / DATABASE_AUTH_TOKEN in .env.\n");
+  console.error("Check MONGODB_URI in .env, and that your Atlas IP allowlist includes this machine.\n");
   process.exit(1);
 }
 
@@ -65,12 +65,13 @@ server.on("error", (err) => {
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
     console.log(`\nReceived ${signal}, shutting down.`);
-    server.close(() => {
-      closeDb();
+    server.close(async () => {
+      await closeDb();
       process.exit(0);
     });
-    setTimeout(() => {
-      closeDb();
+    // Don't let a lingering keep-alive connection block the exit.
+    setTimeout(async () => {
+      await closeDb();
       process.exit(0);
     }, 3000).unref();
   });

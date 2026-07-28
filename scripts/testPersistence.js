@@ -94,7 +94,7 @@ if (!created.ok) process.exit(1);
 const id = created.patient.patient_id;
 console.log(`        patient_id ${id}`);
 
-closeDb();
+await closeDb();
 console.log("        connection closed (simulating a restart / new invocation)");
 
 console.log("\ncall 2 — cold read from a separate process");

@@ -70,4 +70,4 @@ for (const seed of seeds) {
 }
 
 console.log(`\n${created} created, ${skipped} already present.`);
-closeDb();
+await closeDb();

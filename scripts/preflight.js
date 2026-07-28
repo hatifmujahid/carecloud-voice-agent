@@ -60,31 +60,11 @@ else info("VAPI_ASSISTANT_ID blank — deploy:assistant will CREATE a new assist
 if (SECRET) ok("VAPI_SERVER_SECRET set (webhook is authenticated)");
 else warn("VAPI_SERVER_SECRET blank — the webhook accepts requests from anyone", "Set it in .env, then npm run deploy:assistant");
 
-// The single mistake that would silently lose every patient record: a file-backed
-// database on a serverless host, whose filesystem is ephemeral. It looks fine
-// until the reviewer calls back and their record is gone.
-const DATABASE_URL = process.env.DATABASE_URL || "file:./data/patients.db";
-const isRemoteDb = /^(libsql|https?|wss?):/i.test(DATABASE_URL);
-
-if (isRemoteDb) {
-  ok(`DATABASE_URL -> ${DATABASE_URL.replace(/\?.*$/, "")}`);
-  if (!process.env.DATABASE_AUTH_TOKEN) {
-    bad("DATABASE_URL is remote but DATABASE_AUTH_TOKEN is empty", "turso db tokens create <db>");
-  } else {
-    ok("DATABASE_AUTH_TOKEN is set");
-  }
-} else {
-  info(`DATABASE_URL -> ${DATABASE_URL} (local file)`);
-}
-
-const serverlessHost = SERVER_URL && /vercel\.app|now\.sh|netlify\.app/.test(SERVER_URL);
-if (serverlessHost && !isRemoteDb) {
-  bad(
-    "SERVER_URL is a serverless host but DATABASE_URL is a local file — that filesystem is\n" +
-      "        ephemeral, so every record would be lost between calls",
-    "Create a Turso database, then set DATABASE_URL=libsql://... and DATABASE_AUTH_TOKEN"
-  );
-}
+// Report the database target, credential-free. src/db.js owns the actual
+// validation of the connection string.
+const { CONFIG_ERROR, DB_DESCRIPTION } = await import("../src/db.js");
+if (CONFIG_ERROR) bad(CONFIG_ERROR, "Set MONGODB_URI in .env and in the host's environment");
+else ok(`MONGODB_URI -> ${DB_DESCRIPTION}`);
 
 // --- 2. Local server -------------------------------------------------------
 console.log("\nlocal server");
