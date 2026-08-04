@@ -19,6 +19,10 @@ const SERVER_URL = process.env.SERVER_URL; // public URL of POST /vapi/webhook
 const VAPI_SERVER_SECRET = process.env.VAPI_SERVER_SECRET;
 const ASSISTANT_ID = process.env.VAPI_ASSISTANT_ID;
 
+const VOICE_PROVIDER = process.env.VOICE_PROVIDER || "vapi";
+// Vapi-native voices carry a model version; 2 is the current one for Elliot.
+const VOICE_VERSION = Number(process.env.VOICE_VERSION || 2);
+
 if (!VAPI_API_KEY) {
   console.error("Missing VAPI_API_KEY. Set it in .env (Vapi dashboard -> Organization -> API Keys -> Private).");
   process.exit(1);
@@ -400,7 +404,7 @@ const assistant = {
 
   model: {
     provider: "openai",
-    model: process.env.LLM_MODEL || "gpt-4o",
+    model: process.env.LLM_MODEL || "gpt-4.1",
     // Low but not zero: enough variation to sound human, not enough to start
     // improvising around the intake script or the tool contract.
     temperature: 0.4,
@@ -412,19 +416,41 @@ const assistant = {
     // Voice availability is account-specific — a valid-looking ID from the docs
     // can still 400. `npm run probe:voices` reports what this account accepts.
     // vapi/Elliot needs no third-party provider credential.
-    provider: process.env.VOICE_PROVIDER || "vapi",
+    provider: VOICE_PROVIDER,
     voiceId: process.env.VOICE_ID || "Elliot",
+    // `version` is a Vapi-native-voice field only; sending it to another
+    // provider is a 400. Elliot supports v2, which is the better-sounding model.
+    ...(VOICE_PROVIDER === "vapi" ? { version: VOICE_VERSION } : {}),
   },
 
   transcriber: {
     // Names, street names and spelled-out letters are the hard part of this
-    // call. Deepgram's phonecall-tuned model is noticeably better on 8kHz audio
-    // than the general one; `numerals` keeps digits as digits so the validators
-    // see "4155550123" rather than "four one five...".
-    provider: "deepgram",
-    model: process.env.TRANSCRIBER_MODEL || "nova-2-phonecall",
+    // call, over 8kHz phone audio. Soniox stt-rt-v5 is the lowest-WER option
+    // available on this account (~1.8% vs Deepgram nova-2-phonecall) at roughly
+    // a third of the latency, which matters because STT sits on the critical
+    // path of every turn.
+    //
+    // Trade-off vs the Deepgram config this replaced: Soniox has no `numerals`
+    // flag, so digit formatting is whatever the model emits rather than
+    // something we can force. `src/validation.js` strips non-digits before
+    // checking phone/ZIP, so ordinary "4155550123" and "(415) 555-0123" both
+    // work — but a fully spelled-out "four one five" would not, where the
+    // Deepgram `numerals: true` flag guaranteed it never happened.
+    // `customVocabulary` biases the recogniser toward the terms this call
+    // actually contains, which is the closest equivalent lever.
+    provider: "soniox",
+    model: process.env.TRANSCRIBER_MODEL || "stt-rt-v5",
     language: "en",
-    numerals: true,
+    customVocabulary: [
+      "CareCloud",
+      "Riley",
+      "date of birth",
+      "ZIP code",
+      "apartment",
+      "insurance",
+      "member ID",
+      "emergency contact",
+    ],
   },
 
   // Let the model hang up itself once registration is done, so the call ends on
@@ -497,7 +523,11 @@ const data = JSON.parse(body);
 console.log(`${isUpdate ? "Updated" : "Created"} assistant ${data.id}`);
 console.log(`  name      ${data.name}`);
 console.log(`  model     ${data.model?.provider}/${data.model?.model}`);
-console.log(`  voice     ${data.voice?.provider}/${data.voice?.voiceId}`);
+console.log(
+  `  voice     ${data.voice?.provider}/${data.voice?.voiceId}` +
+    (data.voice?.version ? ` v${data.voice.version}` : ""),
+);
+console.log(`  stt       ${data.transcriber?.provider}/${data.transcriber?.model ?? "default"}`);
 console.log(`  tools     ${(data.model?.tools ?? []).map((t) => t.function?.name).join(", ")}`);
 console.log(`  webhook   ${data.server?.url}`);
 if (!isUpdate) {

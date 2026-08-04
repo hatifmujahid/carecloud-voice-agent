@@ -177,7 +177,7 @@ if (VAPI_API_KEY && ASSISTANT_ID) {
       const a = await res.json();
       ok(`"${a.name}"`);
       ok(`model: ${a.model?.provider}/${a.model?.model}`);
-      ok(`voice: ${a.voice?.provider}/${a.voice?.voiceId}`);
+      ok(`voice: ${a.voice?.provider}/${a.voice?.voiceId}${a.voice?.version ? ` v${a.voice.version}` : ""}`);
       ok(`transcriber: ${a.transcriber?.provider}/${a.transcriber?.model ?? "default"}`);
 
       // The two-files-must-agree check: schemas declared to the model vs the

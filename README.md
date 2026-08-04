@@ -44,7 +44,7 @@ back from the same number to see it recognise you and offer to update instead.
      │  PSTN
      ▼
 ┌─────────────────┐   speech ─► text ─► LLM ─► speech
-│      Vapi       │   Deepgram nova-2-phonecall · GPT-4o · Vapi TTS
+│      Vapi       │   Soniox stt-rt-v5 · GPT-4.1 · Vapi TTS (Elliot v2)
 │  (telephony +   │
 │   STT/TTS/LLM)  │
 └────────┬────────┘
@@ -136,8 +136,9 @@ scripts/testPersistence.js   8 assertions — survives a restart
 | Layer | Choice | Why this one |
 | --- | --- | --- |
 | Telephony + STT/TTS | **Vapi** | Abstracts the whole media path, so the time went into the prompt, the tool contract and the data layer rather than an audio pipeline. Barge-in and endpointing are configurable rather than hand-built. |
-| Transcriber | **Deepgram `nova-2-phonecall`** | The hard part of this call is names, street names and spelled-out letters over 8 kHz phone audio. The phonecall-tuned model is meaningfully better than the general one; `numerals: true` keeps digits as digits so validators see `4155550123`, not "four one five...". |
-| LLM | **OpenAI GPT-4o** | Needs to follow a long structured intake prompt *and* a six-tool contract while sounding natural. `gpt-4o-mini` drifted off the readback step and skipped `lookupPatientByPhone` in testing; the latency cost is worth it. Configurable via `LLM_MODEL`. |
+| Transcriber | **Soniox `stt-rt-v5`** | The hard part of this call is names, street names and spelled-out letters over 8 kHz phone audio, and STT sits on the critical path of every turn — so accuracy and latency both matter. `stt-rt-v5` is the lowest-WER option available on this account (~1.8%) at roughly a third of the latency of the Deepgram config it replaced. Its `customVocabulary` is seeded with the terms this call actually contains. Configurable via `TRANSCRIBER_MODEL`. |
+| LLM | **OpenAI GPT-4.1** | Needs to follow a long structured intake prompt *and* a six-tool contract while sounding natural. The mini tiers drifted off the readback step and skipped `lookupPatientByPhone` in testing; the latency cost is worth it. Configurable via `LLM_MODEL`. |
+| Voice | **Vapi `Elliot` v2** | Needs no third-party provider credential, so there is one less vendor to hold a key for. v2 is the current model for this voice. Configurable via `VOICE_PROVIDER` / `VOICE_ID` / `VOICE_VERSION`. |
 | Backend | **Node 22 + Express** | Vapi's webhook contract is plain JSON, and an Express app *is* a `(req, res)` handler — so the same code runs as a local server and as a Vercel function with no adapter. |
 | Database | **MongoDB Atlas** | A managed network database, which is what serverless requires — and the brief permits any relational or document store. Schema is still enforced at the database level via `$jsonSchema` validators. See below. |
 | Hosting | **Vercel** | Requested. What that costs and how it's mitigated is documented under [trade-offs](#known-limitations-and-trade-offs). |
@@ -223,9 +224,10 @@ while quietly losing data. Local development points at the same Atlas cluster; s
 | `VAPI_SERVER_SECRET` | recommended | Shared secret; the server rejects webhooks without a matching `x-vapi-secret`. Without it the webhook is open to anyone who learns the URL. |
 | `VAPI_ASSISTANT_ID` | after first deploy | Set it, or every deploy creates a *duplicate* assistant instead of updating. |
 | `PORT` | no | Local only. Default `3000`. |
-| `LLM_MODEL` | no | Default `gpt-4o`. |
-| `TRANSCRIBER_MODEL` | no | Default `nova-2-phonecall`. |
+| `LLM_MODEL` | no | Default `gpt-4.1`. |
+| `TRANSCRIBER_MODEL` | no | Default `stt-rt-v5` (Soniox). |
 | `VOICE_PROVIDER` / `VOICE_ID` | no | Default `vapi` / `Elliot`, which needs no third-party voice credential. |
+| `VOICE_VERSION` | no | Default `2`. Vapi-native voices only; not sent for other providers. |
 | `LOG_FILE` | no | Extra JSON log file. Ignored on Vercel (read-only FS); stdout is the log there. |
 | `TEST_BASE_URL` | no | Point the test scripts at a deployed instance. |
 

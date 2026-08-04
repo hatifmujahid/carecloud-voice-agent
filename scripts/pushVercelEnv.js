@@ -26,6 +26,7 @@ const KEYS = [
   { name: "TRANSCRIBER_MODEL", required: false },
   { name: "VOICE_PROVIDER", required: false },
   { name: "VOICE_ID", required: false },
+  { name: "VOICE_VERSION", required: false },
 ];
 
 const TARGETS = ["production", "preview", "development"];
